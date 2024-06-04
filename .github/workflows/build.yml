@@ -1,18 +1,58 @@
- - name: Download a Build Artifact
-  uses: actions/download-artifact@v4.1.7
-  with:
-    # Name of the artifact to download. If unspecified, all artifacts for the run are downloaded.
-    name: # optional
-    # Destination path. Supports basic tilde expansion. Defaults to $GITHUB_WORKSPACE
-    path: # optional
-    # A glob pattern matching the artifacts that should be downloaded. Ignored if name is specified.
-    pattern: # optional
-    # When multiple artifacts are matched, this changes the behavior of the destination directories. If true, the downloaded artifacts will be in the same directory specified by path. If false, the downloaded artifacts will be extracted into individual named directories within the specified path.
-    merge-multiple: # optional, default is false
-    # The GitHub token used to authenticate with the GitHub API. This is required when downloading artifacts from a different repository or from a different workflow run. If this is not specified, the action will attempt to download artifacts from the current repository and the current workflow run.
-    github-token: # optional
-    # The repository owner and the repository name joined together by "/". If github-token is specified, this is the repository that artifacts will be downloaded from.
-    repository: # optional, default is ${{ github.repository }}
-    # The id of the workflow run where the desired download artifact was uploaded from. If github-token is specified, this is the run that artifacts will be downloaded from.
-    run-id: # optional, default is ${{ github.run_id }}
-          
+name: Deploy to ECR
+
+on:
+ 
+  push:
+    branches: [ master ]
+
+env:
+  ECR_REPOSITORY: flask-app
+  EKS_CLUSTER_NAME: Kubernetes-demo 
+  AWS_REGION: us-east-1
+
+jobs:
+  
+  build:
+    
+    name: Deployment
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Set short git commit SHA
+      id: commit
+      uses: prompt/actions-commit-hash@v2
+
+    - name: Check out code
+      uses: actions/checkout@v2
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{env.AWS_REGION}}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}        
+        IMAGE_TAG: ${{ steps.commit.outputs.short }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f docker/Dockerfile .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Update kube config
+      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+
+    - name: Deploy to EKS
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}        
+        IMAGE_TAG: ${{ steps.commit.outputs.short }}
+      run: |
+        sed -i.bak "s|DOCKER_IMAGE|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" manifests/hello-app-deployment.yaml && \
+        kubectl apply -f manifests/hello-app-deployment.yaml
+        kubectl apply -f manifests/hello-app-service.yaml
